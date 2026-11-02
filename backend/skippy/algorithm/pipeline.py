@@ -14,14 +14,15 @@ _cache = OrderedDict()      # 用于缓存场景和中间结果的有序字典
 _cache_lock = Lock()        # 用于保护缓存的锁
 
 def polyline_distances(points, line):
-    # Compute the minimum distance from each point to a polyline defined by a sequence of vertices.
+    # 计算点集到线段的最短距离
     a, edge = line[:-1], np.diff(line, axis=0)
     differences = points[:, None, :]-a[None, :, :]
     t = np.clip(np.sum(differences*edge, axis=2)/np.maximum(np.sum(edge*edge, axis=1), 1e-12), 0, 1)
     return np.min(np.linalg.norm(differences-t[:, :, None]*edge, axis=2), axis=1)
 
-# 准备场景并缓存中间结果以加速重复请求
+
 def snapshot(request, anchors=None):
+    # 准备场景并缓存中间结果以加速重复请求
     payload = request.model_dump(exclude={"locks"})
     payload["options"].pop("iterations")            # iterations are not relevant to the cached data, as they only affect smoothing after the graph is solved.
     payload["anchors"] = np.asarray(anchors).tolist() if anchors is not None else None
@@ -84,36 +85,46 @@ def solve(request: SolveInput, anchors=None):
     started = perf_counter()
     data, cached = snapshot(request, anchors)       # 准备场景
     scene, options = data["scene"], request.options
+
     graph_start = perf_counter()
-    raw, path, cost, edges = solve_graph(scene, list(data["segments"]), data["origin"], data["directions"],
+    raw, path, cost, edges = solve_graph(scene, list(data["segments"]), data["origin"], data["directions"],     # 建立图并求解最优路径
         data["pixels"], data["on"], data["cuts"], request.locks, options, data["closed"], data["edge_cache"])
-    segments = sorted(data["segments"], key=lambda s: (s.start, s.end, s.id))
+    segments = sorted(data["segments"], key=lambda s: (s.start, s.end, s.id))                                   # 对路径段进行排序，按起点、终点和ID排序
     graph_end = perf_counter()
-    smoothed, target_height, trace = smooth(raw, scene, data["origin"], data["directions"], data["heights"],
+
+    smoothed, target_height, trace = smooth(raw, scene, data["origin"], data["directions"], data["heights"],    # 对路径进行平滑处理，计算目标高度和能量轨迹
         options.iterations, options.collision_tolerance, data["closed"])
+    
     render, parameter = catmull_rom(smoothed, data["closed"])
     display_kind = "catmull_rom"
+
+    # 检查最终曲线是否穿入几何体，如果穿入则尝试使用平滑后的曲线作为渲染结果
     if not scene.clear(render, options.collision_tolerance):
         render, parameter = smoothed, np.arange(len(smoothed))
         display_kind = "validated_polyline"
     if not scene.clear(render, options.collision_tolerance):
         raise SolveError("no_path", "最终曲线未通过穿入检查，请调整笔触或几何布局。")
-    projected = project(request.camera, scene.world(render))
-    distances = polyline_distances(projected, data["pixels"])
-    reverse = polyline_distances(data["pixels"], projected)
-    height = np.interp(parameter, np.arange(len(target_height)), target_height)
-    height_error = abs(scene.distance(render)-height)
-    tracks = {}
+    
+    projected = project(request.camera, scene.world(render))    # 将渲染曲线投影到相机坐标系中
+    distances = polyline_distances(projected, data["pixels"])   # 计算渲染曲线的投影与原始像素点的距离
+    reverse = polyline_distances(data["pixels"], projected)     # 计算原始像素点到渲染曲线的投影距离
+    height = np.interp(parameter, np.arange(len(target_height)), target_height)     # 计算渲染曲线的高度信息
+    height_error = abs(scene.distance(render)-height)           # 计算渲染曲线的高度误差
+
+    tracks = {}                                                 # 用于存储每个轨迹的相关信息，包括起点、终点、深度、是否被选中等
     for segment in segments:
         tracks.setdefault(segment.track, {"id": segment.track, "group": segment.group, "start": segment.start,
             "end": segment.end, "depth": float(np.mean(np.linalg.norm(segment.points-data["origin"], axis=1))*scene.scale),
             "selected": False, "points": scene.world(segment.points).tolist()})
     for index in path:
         tracks[segments[index].track]["selected"] = True
+
     all_candidates = [[{"rank": v["rank"], "depth": v["depth"]*scene.scale, "point": scene.world(v["point"]).tolist(),
                        "object": v["object"], "pruned": v["pruned"]} for v in row] for row in data["candidates"]]
     timings = dict(data["timings"], graph_ms=(graph_end-graph_start)*1000,
                    smooth_ms=(perf_counter()-graph_end)*1000, total_ms=(perf_counter()-started)*1000)
+
+    # 返回结果字典，包含渲染曲线、原始曲线、平滑曲线、显示类型、选中的轨迹、各种度量指标和调试信息
     return dict(status="ok", closed=bool(data["closed"]),
         points=scene.world(render).tolist(), raw_points=scene.world(raw).tolist(), control_points=scene.world(smoothed).tolist(),
         display_kind=display_kind, selected_tracks=[segments[i].track for i in path],

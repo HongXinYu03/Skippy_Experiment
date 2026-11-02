@@ -7,7 +7,19 @@ from .geometry import unit
 WEIGHTS = np.array([0.0039, 0.011, 0.982, 0.0019])
 WEIGHTS /= WEIGHTS.sum()
 
+
 def resample_3d(points, heights, directions):
+    """ 
+    对3D点集进行重采样
+    参数：
+        points: 点集，二维数组，每一行表示一个点的坐标
+        heights: 高度数组，表示每个点的高度信息
+        directions: 方向数组，表示每个点的方向信息
+    返回值：
+        q: 重采样后的点集
+        h: 重采样后的高度数组
+        r: 重采样后的方向数组
+    """
     lengths = np.r_[0, np.cumsum(np.linalg.norm(np.diff(points, axis=0), axis=1))]
     valid = np.r_[True, np.diff(lengths) > 1e-9]
     lengths = lengths[valid]
@@ -18,7 +30,18 @@ def resample_3d(points, heights, directions):
     r = unit(np.column_stack([np.interp(targets, lengths, r[:, axis]) for axis in range(3)]))
     return q, h, r
 
+
+
 def operators(n, closed):
+    """ 
+    内部能量最小化优化器
+    参数：
+        n: 点的数量
+        closed: 是否闭合曲线
+    返回值：
+        first: 一阶差分矩阵
+        second: 二阶差分矩阵
+    """
     step = 1/max(1, n-1)
     if closed:
         first = sparse.lil_matrix((n, n))
@@ -32,7 +55,22 @@ def operators(n, closed):
     return (sparse.diags([-np.ones(n-1), np.ones(n-1)], [0, 1], shape=(n-1, n))/step,
             sparse.diags([np.ones(n-2), -2*np.ones(n-2), np.ones(n-2)], [0, 1, 2], shape=(n-2, n))/step**2)
 
+
 def energy_gradient(points, scene, origin, targets, heights, first, second):
+    """ 
+    计算点集的内部能量和梯度
+    参数：
+        points: 点集，二维数组，每一行表示一个点的坐标
+        scene: 场景对象
+        origin: 原点坐标，三维向量
+        targets: 目标方向，二维数组，每一行表示一个点的目标方向
+        heights: 高度数组，表示每个点的高度信息
+        first: 一阶差分矩阵
+        second: 二阶差分矩阵
+    返回值：
+        energy: 内部能量
+        gradient: 梯度
+    """
     alpha, beta, gamma, delta = WEIGHTS
     n = len(points)
     d1, d2 = first@points, second@points
@@ -50,7 +88,24 @@ def energy_gradient(points, scene, origin, targets, heights, first, second):
     gradient += delta/n*(error/absolute)[:, None]*scene.gradient(points)
     return float(energy), gradient
 
+
 def smooth(points, scene, origin, directions, heights, iterations, tolerance, closed=False):
+    """ 
+    对点集进行平滑处理，以最小化内部能量和外部约束
+    参数：
+        points: 点集，二维数组，每一行表示一个点的坐标
+        scene: 场景对象
+        origin: 原点坐标，三维向量
+        directions: 目标方向，二维数组，每一行表示一个点的目标方向
+        heights: 高度数组，表示每个点的高度信息
+        iterations: 迭代次数
+        tolerance: 容差
+        closed: 是否闭合曲线
+    返回值：
+        points: 平滑后的点集
+        heights: 平滑后的高度信息
+        info: 包含能量和迭代次数的信息
+    """
     q, h, targets = resample_3d(points, heights, directions)
     # Resampling chords can penetrate a surface; retain the feasible original if necessary.
     if not scene.clear(q, tolerance):

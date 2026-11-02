@@ -1,8 +1,14 @@
 # Skippy Studio
 
-Python 算法后端 + Vue / TypeScript / Three.js 画布。依据《Skippy: Single View 3D Curve Interactive Modeling》（SIGGRAPH 2017）及用户确认的复现计划 v0.2 实现。项目使用已创建的 Conda 环境 `skippy`。
 
 ## 本地运行
+
+如果本地没有创建conda环境需要创建python虚拟环境
+
+```powershell
+conda create -n skippy python=3.12
+conda activate skippy
+``` 
 
 终端一：
 
@@ -23,12 +29,6 @@ npm run dev
 
 浏览器打开 `http://127.0.0.1:5173/`。API 文档为 `http://127.0.0.1:8000/docs`。前端开发服务将 `/api` 代理到本地 Python 服务。已安装好依赖时，之后启动只需各终端最后一条运行命令。无需再创建其他 Python 虚拟环境。
 
-如果本地没有创建conda环境需要创建python虚拟环境
-
-```powershell
-conda create -n skippy python=3.12
-conda activate skippy
-``` 
 
 ## 使用
 
@@ -66,6 +66,7 @@ python -m skippy.algorithm.benchmark
 - `backend/skippy/algorithm/pipeline.py`：缓存、skip、局部重画、诊断与质量检查。
 - `backend/skippy/algorithm/models.py`：独立算法输入 `SolveInput` / `RedrawInput`、几何及参数校验。
 - `backend/skippy/algorithm/cli.py`：离线求解；同目录的 `fixtures.py`、`benchmark.py`、`diagnose.py` 用于案例、性能和数值诊断。
+
 - `backend/skippy/server/api.py`：FastAPI 路由、CORS、WebSocket 待处理队列。
 - `backend/skippy/server/schemas.py`：前端请求结构，包含 `request_id` 和 `revision`。
 - `backend/skippy/server/service.py`：请求转换、算法调用、错误转换和响应元数据回填。
@@ -75,7 +76,6 @@ python -m skippy.algorithm.benchmark
 - `frontend/src/App.vue`：交互工作流、候选选择、撤销重做、JSON 保存、调试面板。
 - `docs/reproduction.md`：论文章节对应、数值约定、工程差异和验收结果。
 
-原 Vue 文件在首次覆盖前备份到 `.skippy-backup`。原参考目录 `RTSkippy` 保持只读。
 
 ## 独立调试算法
 
@@ -94,6 +94,3 @@ print(result["metrics"])
 
 数值诊断使用 `python -m skippy.algorithm.diagnose`。启动前后端后，可用 `python -m skippy.server.smoke` 检查联通性。目录调整后，正在运行的旧后端需停止并使用上方新命令重新启动。
 
-## 后续 Sites 发布
-
-目前按用户要求仅完成本地版本。Sites 可承载构建后的 Vue 静态资源，Python API 需要独立 HTTPS 托管。届时构建前设置 `VITE_API_BASE_URL` 为后端域名，后端设置 `SKIPPY_ORIGINS` 为 Sites 域名；本地默认连接方式无需改动。尚未创建或发布线上站点。

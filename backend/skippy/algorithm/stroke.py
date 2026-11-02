@@ -3,16 +3,17 @@ import numpy as np
 from .geometry import unit
 from .models import SolveError
 
-"""  
-二维重采样
-参数：
-    points: 输入的点集，二维数组，每一行表示一个点的坐标
-    spacing: 重采样的间距，表示相邻点之间的最小距离
-    maximum: 重采样后的最大点数，确保不会超过该值
-返回值：
-    返回重采样后的点集，二维数组，每一行表示一个点的坐标
-"""
+
 def resample_2d(points, spacing, maximum):
+    """  
+    二维重采样
+    参数：
+        points: 输入的点集，二维数组，每一行表示一个点的坐标
+        spacing: 重采样的间距，表示相邻点之间的最小距离
+        maximum: 重采样后的最大点数，确保不会超过该值
+    返回值：
+        返回重采样后的点集，二维数组，每一行表示一个点的坐标
+    """
     p = np.asarray(points, float)                                               # 讲输入的点转换为浮点数的numpy数组，输入的点是一个二维数组，每一行表示一个点的坐标
     p = p[np.r_[True, np.linalg.norm(np.diff(p, axis=0), axis=1) > 1e-6]]       # 过滤掉相邻点之间距离小于1e-6的点，确保至少有两个不同的点
     if len(p) < 2:
@@ -23,16 +24,17 @@ def resample_2d(points, spacing, maximum):
     s = np.linspace(0, lengths[-1], count)
     return np.column_stack([np.interp(s, lengths, p[:, i]) for i in range(2)])
 
-""" 
-从相机视角到世界坐标的射线
-参数：
-    camera: 相机对象
-    pixels: 像素坐标，二维数组，每一行表示一个像素的坐标
-返回值：
-    origin: 射线的起点，三维向量
-    directions: 射线的方向，三维向量
-"""
+
 def rays(camera, pixels):
+    """ 
+    从相机视角到世界坐标的射线
+    参数：
+        camera: 相机对象
+        pixels: 像素坐标，二维数组，每一行表示一个像素的坐标
+    返回值：
+        origin: 射线的起点，三维向量
+        directions: 射线的方向，三维向量
+    """
     world = np.asarray(camera.world).reshape(4, 4, order="F")
     projection = np.asarray(camera.projection).reshape(4, 4, order="F")
     p = np.asarray(pixels)
@@ -42,32 +44,34 @@ def rays(camera, pixels):
     points = local@world.T
     return world[:3, 3], unit(points[:, :3]-world[:3, 3])
 
-""" 
-将世界坐标投影到相机坐标
-参数：
-    camera: 相机对象
-    points: 世界坐标，二维数组，每一行表示一个点的坐标
-返回值：
-    pixels: 相机坐标，二维数组，每一行表示一个像素的坐标
- """
+
 def project(camera, points):
+    """ 
+    将世界坐标投影到相机坐标
+    参数：
+        camera: 相机对象
+        points: 世界坐标，二维数组，每一行表示一个点的坐标
+    返回值：
+        pixels: 相机坐标，二维数组，每一行表示一个像素的坐标
+    """
     world = np.asarray(camera.world).reshape(4, 4, order="F")
     projection = np.asarray(camera.projection).reshape(4, 4, order="F")
     p = np.column_stack([points, np.ones(len(points))])@np.linalg.inv(world).T@projection.T
     ndc = p[:, :2]/p[:, 3:4]
     return np.column_stack([(ndc[:, 0]+1)*camera.width/2, (1-ndc[:, 1])*camera.height/2])
 
-""" 
-准备笔触数据,检查几何体投影并计算高度信息
-参数：
-    scene: 场景对象
-    camera: 相机对象
-    pixels: 像素坐标，二维数组，每一行表示一个像素的坐标
-    anchors: 锚点坐标，二维数组，每一行表示一个锚点的坐标
-返回值：
-    无
- """
+
 def prepare(scene, camera, pixels, anchors=None):
+    """ 
+    准备笔触数据,检查几何体投影并计算高度信息
+    参数：
+        scene: 场景对象
+        camera: 相机对象
+        pixels: 像素坐标，二维数组，每一行表示一个像素的坐标
+        anchors: 锚点坐标，二维数组，每一行表示一个锚点的坐标
+    返回值：
+        无
+    """
     origin_world, directions = rays(camera, pixels)
     origin = scene.normalize(origin_world)
     hits = [scene.intervals(origin, r) for r in directions]
@@ -121,18 +125,21 @@ def prepare(scene, camera, pixels, anchors=None):
 
 
 
-""" 计算候选顶点
-参数：
-    scene: 场景对象
-    origin: 射线的起点，三维向量
-    directions: 射线的方向，三维向量
-    on: 布尔数组，表示每个射线是否与几何体相交
-    heights: 高度数组，表示每个射线的高度信息
-    restore_pruned: 布尔值，表示是否恢复被修剪的顶点
-    anchors: 锚点坐标，二维数组，每一行表示一个锚点的坐标
-返回值：
-    candidates: 候选顶点列表，每个元素是一个字典，包含顶点的相关信息，包括样本索引、深度、位置、法线、对象ID"""
+
 def candidate_vertices(scene, origin, directions, on, heights, restore_pruned, anchors=None):
+    """ 
+    计算候选顶点
+    参数：
+        scene: 场景对象
+        origin: 射线的起点，三维向量
+        directions: 射线的方向，三维向量
+        on: 布尔数组，表示每个射线是否与几何体相交
+        heights: 高度数组，表示每个射线的高度信息
+        restore_pruned: 布尔值，表示是否恢复被修剪的顶点
+        anchors: 锚点坐标，二维数组，每一行表示一个锚点的坐标
+    返回值：
+        candidates: 候选顶点列表，每个元素是一个字典，包含顶点的相关信息，包括样本索引、深度、位置、法线、对象ID
+    """
     candidates = []
     for i, r in enumerate(directions):
         row = []

@@ -19,14 +19,15 @@ def curvature(points):
     chord = np.linalg.norm(points[2:]-points[:-2], axis=1)
     return 2*np.linalg.norm(np.cross(a[:-1], a[1:]), axis=1)/np.maximum(la[:-1]*la[1:]*chord, 1e-12)
 
-""" 
-计算曲线的变差
-参数：
-    points: 点集，二维数组，每一行表示一个点的坐标
-返回值：
-    variation: 变差，表示曲线的不平整程度
-"""
+
 def variation(points):
+    """ 
+    计算曲线的变差
+    参数：
+        points: 点集，二维数组，每一行表示一个点的坐标
+    返回值：
+        variation: 变差，表示曲线的不平整程度
+    """
     k = curvature(points)
     return float(np.sum(abs(np.diff(k)))) if len(k) > 1 else 0.0
 
@@ -58,19 +59,20 @@ class Segment:
     ranks: list[int]
     cost: float
 
-""" 
-构建段
-参数：
-    scene: 场景对象
-    candidates: 候选顶点列表
-    sequences: 序列列表
-    cuts: 切割点列表
-    options: 选项
-返回值：
-    segments: 段列表
-    rejected: 被拒绝的段信息，包括深度、梯度和碰撞的数量
-"""
+
 def build_segments(scene, candidates, sequences, cuts, options):
+    """ 
+    构建段
+    参数：
+        scene: 场景对象
+        candidates: 候选顶点列表
+        sequences: 序列列表
+        cuts: 切割点列表
+        options: 选项
+    返回值：
+        segments: 段列表
+        rejected: 被拒绝的段信息，包括深度、梯度和碰撞的数量
+    """
     segments = []
     rejected = {"depth": 0, "gradient": 0, "collision": 0}
     for sequence in sequences:
@@ -187,6 +189,26 @@ def shortest_path(node_cost, edges, starts, ends):
     return path[::-1], float(cost)
 
 def solve_graph(scene, segments, origin, directions, pixels, on, cuts, locks, options, closed, edge_cache=None):
+    """ 
+     求解段图，找到最优路径
+     参数：
+         scene: 场景对象
+         segments: 段列表
+         origin: 原点坐标，三维向量
+         directions: 方向向量，二维数组，每一行表示一个方向向量
+         pixels: 像素点，二维数组，每一行表示一个像素点
+         on: 布尔数组，表示哪些点是开启的
+         cuts: 切割点列表   
+         locks: 锁定点的字典，键为点的索引，值为锁定的类型（例如"fixed"表示固定点）
+         options: 选项对象
+         closed: 布尔值，表示是否闭合
+         edge_cache: 边缘缓存
+    返回值：
+        points: 最优路径的点集
+        path: 最优路径的索引列表
+        cost: 最优路径的代价
+        edges: 边缘字典，键为边的起点和终点索引，值为边的代价
+    """
     if edge_cache is None:
         edge_cache = {}
     segments.sort(key=lambda s: (s.start, s.end, s.id))

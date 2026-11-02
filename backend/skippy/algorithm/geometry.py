@@ -10,6 +10,7 @@ TETRA = np.array([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]], float) / np
 FACES = [(0, 1, 2), (0, 3, 1), (0, 2, 3), (1, 3, 2)]
 
 def unit(v):
+    """Normalize a vector or array of vectors."""
     return v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), EPS)
 
 def triangle_distance(points, a, b, c):

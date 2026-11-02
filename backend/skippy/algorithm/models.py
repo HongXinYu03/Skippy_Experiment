@@ -51,11 +51,12 @@ class Options(Model):
     closed: bool | None = None
 
 class SolveInput(Model):
-    objects: list[Shape] = Field(max_length=32)
-    camera: Camera
-    points: list[tuple[float, float]] = Field(min_length=2, max_length=12000)
-    options: Options = Field(default_factory=Options)
-    locks: dict[int, str] = Field(default_factory=dict)
+    """Input for the solve operation."""
+    objects: list[Shape] = Field(max_length=32)                 # 场景中的对象列表，最多包含32个对象
+    camera: Camera                                              # 相机参数，包括世界矩阵、投影矩阵、宽度和高度
+    points: list[tuple[float, float]] = Field(min_length=2, max_length=12000)   # 点集，表示笔触的二维坐标，至少包含2个点，最多包含12000个点
+    options: Options = Field(default_factory=Options)           # 求解选项，包括间距、最大点数、迭代次数等
+    locks: dict[int, str] = Field(default_factory=dict)         # 锁定点的字典，键为点的索引，值为锁定的类型（例如"fixed"表示固定点）
 
 class RedrawInput(Model):
     solve: SolveInput

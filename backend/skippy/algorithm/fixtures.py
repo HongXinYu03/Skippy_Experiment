@@ -1,9 +1,10 @@
+"""Fixtures for testing and debugging the Skippy inference algorithm."""
 import numpy as np
 from .models import Camera, Shape, SolveInput, Options
 from .geometry import unit
 from .stroke import project
 
-# Fixtures for testing and debugging the Skippy inference algorithm.
+
 def camera(position=(0, 0, 6), width=1000, height=700):
     p = np.array(position, float)
     z = unit(p)
