@@ -1,0 +1,9 @@
+.skippy-backup/
+__pycache__/
+.pytest_cache/
+*.pyc
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
+.env
+*.log
