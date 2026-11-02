@@ -43,7 +43,7 @@ const options = ref<Options>({
   spacing: 8,
   max_points: 240,
   iterations: 80,
-  max_segments: 2400,
+  max_segments: 4800,
   depth_threshold: 0.25,
   gradient_cosine: -0.5,
   collision_tolerance: 0.0005,

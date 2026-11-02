@@ -42,7 +42,7 @@ class Options(Model):
     spacing: float = Field(default=8, ge=2, le=30)
     max_points: int = Field(default=240, ge=16, le=400)
     iterations: int = Field(default=80, ge=0, le=512)
-    max_segments: int = Field(default=2400, ge=20, le=8000)
+    max_segments: int = Field(default=4800, ge=20, le=8000)
     depth_threshold: float = Field(default=0.25, gt=0, le=2)
     gradient_cosine: float = Field(default=-0.5, ge=-1, le=1)
     collision_tolerance: float = Field(default=0.0005, ge=0.000001, le=0.01)
