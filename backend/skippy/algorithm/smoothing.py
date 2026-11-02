@@ -58,7 +58,7 @@ def operators(n, closed):
 
 def energy_gradient(points, scene, origin, targets, heights, first, second):
     """ 
-    计算点集的内部能量和梯度
+    计算点集的总能量（连续性、平滑、投影及高度）和梯度
     参数：
         points: 点集，二维数组，每一行表示一个点的坐标
         scene: 场景对象
@@ -68,7 +68,7 @@ def energy_gradient(points, scene, origin, targets, heights, first, second):
         first: 一阶差分矩阵
         second: 二阶差分矩阵
     返回值：
-        energy: 内部能量
+        energy: 总能量
         gradient: 梯度
     """
     alpha, beta, gamma, delta = WEIGHTS
@@ -89,7 +89,7 @@ def energy_gradient(points, scene, origin, targets, heights, first, second):
     return float(energy), gradient
 
 
-def smooth(points, scene, origin, directions, heights, iterations, tolerance, closed=False):
+def smooth(points, scene, origin, directions, heights, iterations, tolerance, closed=False, *, fixed_endpoints=False):
     """ 
     对点集进行平滑处理，以最小化内部能量和外部约束
     参数：
@@ -101,6 +101,7 @@ def smooth(points, scene, origin, directions, heights, iterations, tolerance, cl
         iterations: 迭代次数
         tolerance: 容差
         closed: 是否闭合曲线
+        fixed_endpoints: 仅局部重画时固定开放曲线的两个连接端点
     返回值：
         points: 平滑后的点集
         heights: 平滑后的高度信息
@@ -114,43 +115,13 @@ def smooth(points, scene, origin, directions, heights, iterations, tolerance, cl
         q, h, targets = q[:-1], h[:-1], targets[:-1]
     if len(q) < 4:
         return points, heights, {"energies": [], "iterations": 0}
-    original_depth = np.sum((q-origin)*targets, axis=1)
-    key = (targets.tobytes(), h.tobytes(), np.round(original_depth, 9).tobytes(), closed)
-    bounds = scene.height_cache.get(key)
-    if bounds is None:
-        bounds = np.column_stack([original_depth, original_depth])
-        for index, (r, height) in enumerate(zip(targets, h)):
-            if not closed and index in (0, len(q)-1):
-                continue
-            outer = scene.intervals(origin, r, float(height)+.003)
-            inner = scene.intervals(origin, r, max(0.0, float(height)-.003))
-            feasible = []
-            for low, high, _ in outer:
-                cursor = low
-                for a, b, _ in inner:
-                    if b <= cursor or a >= high:
-                        continue
-                    if a > cursor:
-                        feasible.append((cursor, min(a, high)))
-                    cursor = max(cursor, b)
-                if cursor < high:
-                    feasible.append((cursor, high))
-            if feasible:
-                depth = original_depth[index]
-                bounds[index] = min(feasible, key=lambda ab: abs(np.clip(depth, *ab)-depth))
-        if len(scene.height_cache) >= 8:
-            scene.height_cache.pop(next(iter(scene.height_cache)))
-        scene.height_cache[key] = bounds
-    def height_constraint(values):
-        depth = np.sum((values-origin)*targets, axis=1)
-        return origin+np.clip(depth, bounds[:, 0], bounds[:, 1])[:, None]*targets
-    constrained = height_constraint(q)
-    if scene.clear(np.vstack([constrained, constrained[:1]]) if closed else constrained, tolerance):
-        q = constrained
+    # Height is preserved by its energy penalty, with no hard height band or snap.
     first, second = operators(len(q), closed)
     alpha, beta, _, _ = WEIGHTS
     internal = 2*alpha/first.shape[0]*(first.T@first)+2*beta/second.shape[0]*(second.T@second)
-    active = np.arange(len(q)) if closed else np.arange(1, len(q)-1)
+    keep_endpoints = fixed_endpoints and not closed
+    active = np.arange(1, len(q)-1) if keep_endpoints else np.arange(len(q))
+    endpoints = q[[0, -1]].copy() if keep_endpoints else None
     # A fixed positive preconditioner preserves a descent direction for the same energy.
     matrix = internal+sparse.eye(len(q))*.25
     inverse = factorized(matrix.tocsc()[active][:, active])
@@ -171,7 +142,8 @@ def smooth(points, scene, origin, directions, heights, iterations, tolerance, cl
             # angular weight alone is not invariant to scene/pixel discretization.
             depth = np.sum((proposal-origin)*targets, axis=1)
             proposal = origin+depth[:, None]*targets
-            proposal = height_constraint(proposal)
+            if keep_endpoints:
+                proposal[[0, -1]] = endpoints
             if np.all(np.sum((proposal-origin)*targets, axis=1) > 1e-8):
                 new_energy, new_gradient = energy_gradient(proposal, scene, origin, targets, h, first, second)
                 check = np.vstack([proposal, proposal[:1]]) if closed else proposal

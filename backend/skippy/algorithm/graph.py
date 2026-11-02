@@ -151,6 +151,15 @@ def interpolate(origin, directions, pixels, a, b, p, q, mix_cache=None):
     return origin+directions[indices]*depth[:, None]
 
 def outer(origin, directions, segment, leading):
+    """ 
+    计算段的外部点
+    参数：
+        origin: 原点坐标，三维向量
+        directions: 方向向量，二维数组，每一行表示一个方向向量
+        segment: 段对象
+        leading: 布尔值，表示是否为前导段
+    返回值：
+        points: 外部点集，二维数组，每一行表示一个点的坐标"""
     indices = np.arange(0, segment.start+1) if leading else np.arange(segment.end, len(directions))
     depth = np.linalg.norm(segment.points-origin, axis=1)
     if leading:

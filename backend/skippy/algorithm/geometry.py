@@ -130,7 +130,6 @@ class Primitive:
 
 class Scene:
     def __init__(self, objects):
-        self.height_cache = {}
         objects = [o for o in objects if o.enabled]
         if not objects:
             self.center, self.scale, self.objects = np.zeros(3), 1.0, []

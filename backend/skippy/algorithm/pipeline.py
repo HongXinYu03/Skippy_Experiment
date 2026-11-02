@@ -93,7 +93,7 @@ def solve(request: SolveInput, anchors=None):
     graph_end = perf_counter()
 
     smoothed, target_height, trace = smooth(raw, scene, data["origin"], data["directions"], data["heights"],    # 对路径进行平滑处理，计算目标高度和能量轨迹
-        options.iterations, options.collision_tolerance, data["closed"])
+        options.iterations, options.collision_tolerance, data["closed"], fixed_endpoints=anchors is not None)
     
     render, parameter = catmull_rom(smoothed, data["closed"])
     display_kind = "catmull_rom"
@@ -128,16 +128,42 @@ def solve(request: SolveInput, anchors=None):
     return dict(status="ok", closed=bool(data["closed"]),
         points=scene.world(render).tolist(), raw_points=scene.world(raw).tolist(), control_points=scene.world(smoothed).tolist(),
         display_kind=display_kind, selected_tracks=[segments[i].track for i in path],
-        metrics={"projection_rms_px": float(np.sqrt(np.mean(distances**2))), "projection_p95_px": float(np.quantile(distances, .95)),
-            "projection_max_px": float(np.max(distances)), "reverse_projection_max_px": float(np.max(reverse)),
-            "height_p95_normalized": float(np.quantile(height_error, .95)), "height_mean_world": float(np.mean(height_error)*scene.scale),
-            "minimum_clearance_world": float(np.min(scene.distance(render))*scene.scale), "path_cost": cost,
-            "nodes": len(segments), "edges": len(edges), "sample_count": len(raw), "cache_hit": cached, **timings},
-        debug={"pixels": data["pixels"].tolist(), "on": data["on"].tolist(), "heights": (data["heights"]*scene.scale).tolist(),
-            "sequences": data["sequences"], "discontinuities": data["cuts"], "candidates": all_candidates,
-            "tracks": list(tracks.values()), "rejected_connections": data["rejected"], "smoothing": trace, "crease_refinements": data["refinements"],
-            "graph": {"nodes": [{"id": s.id, "track": s.track, "start": s.start, "end": s.end, "cost": s.cost, "selected": i in path} for i, s in enumerate(segments)],
-                      "edges": [{"from": segments[a].id, "to": segments[b].id, "cost": weight} for (a, b), weight in edges.items()]}})
+        metrics={
+            "projection_rms_px": float(np.sqrt(np.mean(distances**2))), 
+            "projection_p95_px": float(np.quantile(distances, .95)),
+            "projection_max_px": float(np.max(distances)), 
+            "reverse_projection_max_px": float(np.max(reverse)),
+            "height_p95_normalized": float(np.quantile(height_error, .95)), 
+            "height_mean_world": float(np.mean(height_error)*scene.scale),
+            "minimum_clearance_world": float(np.min(scene.distance(render))*scene.scale), 
+            "path_cost": cost,
+            "nodes": len(segments), 
+            "edges": len(edges), 
+            "sample_count": len(raw), 
+            "cache_hit": cached, 
+            **timings},
+        debug={
+            "pixels": data["pixels"].tolist(), 
+            "on": data["on"].tolist(), 
+            "heights": (data["heights"]*scene.scale).tolist(),
+            "sequences": data["sequences"], 
+            "discontinuities": data["cuts"], 
+            "candidates": all_candidates,
+            "tracks": list(tracks.values()), 
+            "rejected_connections": data["rejected"], 
+            "smoothing": trace, 
+            "crease_refinements": data["refinements"],
+            "graph": {"nodes": [{
+                                "id": s.id, 
+                                "track": s.track,
+                                "start": s.start, 
+                                "end": s.end, 
+                                "cost": s.cost, 
+                                "selected": i in path} for i, s in enumerate(segments)],
+                      "edges": [{
+                                "from": segments[a].id, 
+                                "to": segments[b].id,
+                                "cost": weight} for (a, b), weight in edges.items()]}})
 
 """ 
     Redraw function for Skippy, which allows users to redraw a portion of the path while keeping the endpoints fixed.
