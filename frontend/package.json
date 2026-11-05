@@ -9,6 +9,8 @@
     "preview": "vite preview",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:models-live": "node --experimental-strip-types scripts/smoke-models.ts",
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {

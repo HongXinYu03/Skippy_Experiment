@@ -3,6 +3,7 @@ import numpy as np
 from scipy import sparse
 from scipy.sparse.linalg import factorized
 from .geometry import unit
+from .progress import tracked, stage, progress_iter, current_step
 
 WEIGHTS = np.array([0.0039, 0.011, 0.982, 0.0019])
 WEIGHTS /= WEIGHTS.sum()
@@ -81,14 +82,19 @@ def energy_gradient(points, scene, origin, targets, heights, first, second):
     distance = scene.distance(points)
     error = distance-heights
     absolute = np.sqrt(error**2+1e-8)
-    energy = (alpha*np.mean(np.sum(d1*d1, axis=1))+beta*np.mean(np.sum(d2*d2, axis=1))
-              +gamma*np.mean(1-cosine)+delta*np.mean(absolute-1e-4))
+
+    Internal = alpha*np.mean(np.sum(d1*d1, axis=1))+beta*np.mean(np.sum(d2*d2, axis=1))
+    External = gamma*np.mean(1-cosine)+delta*np.mean(absolute-1e-4)
+    energy = Internal+External
+
     gradient = 2*alpha/len(d1)*(first.T@d1)+2*beta/len(d2)*(second.T@d2)
     gradient -= gamma/n*(targets-cosine[:, None]*direction)/np.maximum(length[:, None], 1e-9)
     gradient += delta/n*(error/absolute)[:, None]*scene.gradient(points)
+    
     return float(energy), gradient
 
 
+@tracked("三维重采样与软约束平滑")
 def smooth(points, scene, origin, directions, heights, iterations, tolerance, closed=False, *, fixed_endpoints=False):
     """ 
     对点集进行平滑处理，以最小化内部能量和外部约束
@@ -107,63 +113,78 @@ def smooth(points, scene, origin, directions, heights, iterations, tolerance, cl
         heights: 平滑后的高度信息
         info: 包含能量和迭代次数的信息
     """
-    q, h, targets = resample_3d(points, heights, directions)
-    # Resampling chords can penetrate a surface; retain the feasible original if necessary.
-    if not scene.clear(q, tolerance):
-        q, h, targets = points.copy(), heights.copy(), directions.copy()
-    if closed:
-        q, h, targets = q[:-1], h[:-1], targets[:-1]
+    with stage("三维等距重采样") as task:
+        q, h, targets = resample_3d(points, heights, directions)
+        # Resampling chords can penetrate a surface; retain the feasible original if necessary.
+        if not scene.clear(q, tolerance):
+            q, h, targets = points.copy(), heights.copy(), directions.copy()
+            task.update(detail="重采样弦段穿入，保留原可行折线")
+        if closed:
+            q, h, targets = q[:-1], h[:-1], targets[:-1]
     if len(q) < 4:
+        current_step().finish("不足 4 个点，跳过迭代平滑", total=0)
         return points, heights, {"energies": [], "iterations": 0}
     # Height is preserved by its energy penalty, with no hard height band or snap.
-    first, second = operators(len(q), closed)
-    alpha, beta, _, _ = WEIGHTS
-    internal = 2*alpha/first.shape[0]*(first.T@first)+2*beta/second.shape[0]*(second.T@second)
-    keep_endpoints = fixed_endpoints and not closed
-    active = np.arange(1, len(q)-1) if keep_endpoints else np.arange(len(q))
-    endpoints = q[[0, -1]].copy() if keep_endpoints else None
-    # A fixed positive preconditioner preserves a descent direction for the same energy.
-    matrix = internal+sparse.eye(len(q))*.25
-    inverse = factorized(matrix.tocsc()[active][:, active])
-    energy, gradient = energy_gradient(q, scene, origin, targets, h, first, second)
+    with stage("能量与预条件器初始化", total=3) as task:
+        first, second = operators(len(q), closed)       # 一阶和二阶差分矩阵
+        alpha, beta, _, _ = WEIGHTS
+        internal = 2*alpha/first.shape[0]*(first.T@first)+2*beta/second.shape[0]*(second.T@second)
+        keep_endpoints = fixed_endpoints and not closed
+        active = np.arange(1, len(q)-1) if keep_endpoints else np.arange(len(q))
+        endpoints = q[[0, -1]].copy() if keep_endpoints else None
+        task.update(1)
+        # A fixed positive preconditioner preserves a descent direction for the same energy.
+        matrix = internal+sparse.eye(len(q))*.25
+        inverse = factorized(matrix.tocsc()[active][:, active])
+        task.update(2)
+        energy, gradient = energy_gradient(q, scene, origin, targets, h, first, second)
+        task.update(3, detail=f"初始能量 {energy:.8g}，固定连接端点={keep_endpoints}")
     trace = [energy]
-    for _ in range(iterations):
-        descent = np.zeros_like(q)
-        descent[active] = inverse(gradient[active])
-        magnitude = np.max(np.linalg.norm(descent, axis=1))
-        if magnitude < 1e-9:
-            break
-        descent *= min(1, .025/max(magnitude, 1e-12))
-        accepted = False
-        step = 1.0
-        for _ in range(16):
-            proposal = q-step*descent
-            # Keep the drawing rays as a hard feasibility constraint. The printed
-            # angular weight alone is not invariant to scene/pixel discretization.
-            depth = np.sum((proposal-origin)*targets, axis=1)
-            proposal = origin+depth[:, None]*targets
-            if keep_endpoints:
-                proposal[[0, -1]] = endpoints
-            if np.all(np.sum((proposal-origin)*targets, axis=1) > 1e-8):
-                new_energy, new_gradient = energy_gradient(proposal, scene, origin, targets, h, first, second)
-                check = np.vstack([proposal, proposal[:1]]) if closed else proposal
-                if new_energy < energy-1e-12 and scene.clear(check, tolerance):
-                    q, energy, gradient = proposal, new_energy, new_gradient
-                    trace.append(energy)
-                    accepted = True
-                    break
-            step *= .5
-        if not accepted or abs(trace[-1]-trace[-2]) < 1e-9:
-            break
+    with stage("平滑迭代", total=iterations) as task:
+        reason = "达到迭代上限" if iterations else "迭代上限为 0，仅保留重采样"
+        for iteration in range(iterations):
+            descent = np.zeros_like(q)
+            descent[active] = inverse(gradient[active])
+            magnitude = np.max(np.linalg.norm(descent, axis=1))
+            if magnitude < 1e-9:
+                reason = "下降方向已收敛"
+                break
+            descent *= min(1, .025/max(magnitude, 1e-12))
+            accepted = False
+            step = 1.0
+            for backtrack in range(16):
+                task.update(iteration, detail=f"迭代 {iteration+1}/{iterations}，回溯 {backtrack+1}/16，当前能量 {energy:.8g}")
+                proposal = q-step*descent
+                # Keep the drawing rays as a hard feasibility constraint. The printed
+                # angular weight alone is not invariant to scene/pixel discretization.
+                depth = np.sum((proposal-origin)*targets, axis=1)
+                proposal = origin+depth[:, None]*targets
+                if keep_endpoints:
+                    proposal[[0, -1]] = endpoints
+                if np.all(np.sum((proposal-origin)*targets, axis=1) > 1e-8):
+                    new_energy, new_gradient = energy_gradient(proposal, scene, origin, targets, h, first, second)
+                    check = np.vstack([proposal, proposal[:1]]) if closed else proposal
+                    if new_energy < energy-1e-12 and scene.clear(check, tolerance):
+                        q, energy, gradient = proposal, new_energy, new_gradient
+                        trace.append(energy)
+                        accepted = True
+                        break
+                step *= .5
+            task.update(len(trace)-1)
+            if not accepted or abs(trace[-1]-trace[-2]) < 1e-9:
+                reason = "回溯未找到可行下降步" if not accepted else "能量变化低于收敛阈值"
+                break
+        task.finish(f"有效迭代 {len(trace)-1}/{iterations}；{reason}；最终能量 {energy:.8g}", total=len(trace)-1)
     if closed:
         q, h = np.vstack([q, q[:1]]), np.r_[h, h[0]]
     return q, h, {"energies": trace, "iterations": len(trace)-1}
 
+@tracked("Catmull-Rom 曲线采样")
 def catmull_rom(points, closed=False, subdivisions=5):
     """Uniform cubic Catmull--Rom; return samples and interpolated knot positions."""
     p = points[:-1] if closed else points
     result, parameters = [], []
-    for i in range(len(p) if closed else len(p)-1):
+    for i in progress_iter(range(len(p) if closed else len(p)-1)):
         a, b = p[i], p[(i+1)%len(p)]
         before = p[(i-1)%len(p)] if closed or i else 2*a-b
         after = p[(i+2)%len(p)] if closed or i+2 < len(p) else 2*b-a

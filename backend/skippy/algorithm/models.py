@@ -6,14 +6,34 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, validate_assignment=True)
 
+class MeshData(Model):
+    vertices: list[tuple[float, float, float]] = Field(min_length=3, max_length=100000)
+    faces: list[tuple[int, int, int]] = Field(min_length=1, max_length=100000)
+
+    @model_validator(mode="after")
+    def validate_mesh(self):
+        vertices = np.asarray(self.vertices)
+        faces = np.asarray(self.faces)
+        if faces.min() < 0 or faces.max() >= len(vertices):
+            raise ValueError("Mesh face indices are out of range.")
+        triangles = vertices[faces]
+        extent = max(float(np.ptp(vertices, axis=0).max()), 1e-12)
+        area = np.linalg.norm(np.cross(triangles[:, 1]-triangles[:, 0],
+                                       triangles[:, 2]-triangles[:, 0]), axis=1)
+        if np.any(area <= extent*extent*1e-14):
+            raise ValueError("Mesh contains degenerate triangles.")
+        return self
+
+
 class Shape(Model):
     id: str = Field(min_length=1, max_length=80)
-    kind: Literal["sphere", "box", "tetrahedron"]
+    kind: Literal["sphere", "box", "tetrahedron", "mesh"]
     position: tuple[float, float, float] = (0, 0, 0)
     quaternion: tuple[float, float, float, float] = (0, 0, 0, 1)
     size: tuple[float, float, float] = (1, 1, 1)
     enabled: bool = True
     guide: bool = False
+    mesh: MeshData | None = None
 
     @model_validator(mode="after")
     def validate_geometry(self):
@@ -21,6 +41,8 @@ class Shape(Model):
             raise ValueError("Object sizes must be in (0, 1000].")
         if np.linalg.norm(self.quaternion) < 1e-10:
             raise ValueError("Quaternion must be nonzero.")
+        if (self.kind == "mesh") != (self.mesh is not None):
+            raise ValueError("Only mesh objects must include mesh geometry.")
         return self
 
 class Camera(Model):
@@ -42,7 +64,7 @@ class Options(Model):
     spacing: float = Field(default=8, ge=2, le=30)
     max_points: int = Field(default=240, ge=16, le=400)
     iterations: int = Field(default=80, ge=0, le=512)
-    max_segments: int = Field(default=4800, ge=20, le=8000)
+    max_segments: int = Field(default=20000, ge=20, le=30000)
     depth_threshold: float = Field(default=0.25, gt=0, le=2)
     gradient_cosine: float = Field(default=-0.5, ge=-1, le=1)
     collision_tolerance: float = Field(default=0.0005, ge=0.000001, le=0.01)

@@ -2,6 +2,7 @@
 import numpy as np
 from .geometry import unit
 from .models import SolveError
+from .progress import tracked, stage, progress_iter, current_step
 
 
 def resample_2d(points, spacing, maximum):
@@ -61,6 +62,7 @@ def project(camera, points):
     return np.column_stack([(ndc[:, 0]+1)*camera.width/2, (1-ndc[:, 1])*camera.height/2])
 
 
+@tracked("笔触分类与高度计算")
 def prepare(scene, camera, pixels, anchors=None):
     """ 
     准备笔触数据,检查几何体投影并计算高度信息
@@ -74,7 +76,9 @@ def prepare(scene, camera, pixels, anchors=None):
     """
     origin_world, directions = rays(camera, pixels)
     origin = scene.normalize(origin_world)
-    hits = [scene.intervals(origin, r) for r in directions]
+    with stage("射线求交与 on/off 分类", total=len(directions)) as task:
+        hits = [scene.intervals(origin, r) for r in progress_iter(directions)]
+        task.update(detail=f"命中 {sum(bool(h) for h in hits)} / {len(directions)} 条射线")
     on = np.array([bool(h) for h in hits])
     if anchors is not None:
         on[[0, -1]] = True
@@ -84,38 +88,46 @@ def prepare(scene, camera, pixels, anchors=None):
     if anchors is not None:
         depths[[0, -1]] = np.linalg.norm(np.asarray(anchors)-origin, axis=1)
     discontinuities = []
-    for i in range(len(pixels)-1):
-        if not (on[i] and on[i+1]):
-            continue
-        screen_delta = np.linalg.norm(pixels[i+1]-pixels[i])/max(camera.width, camera.height)
-        jump = abs(depths[i+1]-depths[i])
-        if jump < max(3*screen_delta, 0.025):
-            continue
-        _, middle_ray = rays(camera, [(pixels[i]+pixels[i+1])/2])
-        middle = scene.intervals(origin, middle_ray[0])
-        if not middle or abs(middle[0][0]-(depths[i]+depths[i+1])/2) > 0.4*jump:
-            discontinuities.append(i+1)
+    with stage("深度不连续检测", total=len(pixels)-1) as task:
+        for i in progress_iter(range(len(pixels)-1)):
+            if not (on[i] and on[i+1]):
+                continue
+            screen_delta = np.linalg.norm(pixels[i+1]-pixels[i])/max(camera.width, camera.height)
+            jump = abs(depths[i+1]-depths[i])
+            if jump < max(3*screen_delta, 0.025):
+                continue
+            _, middle_ray = rays(camera, [(pixels[i]+pixels[i+1])/2])
+            middle = scene.intervals(origin, middle_ray[0])
+            if not middle or abs(middle[0][0]-(depths[i]+depths[i+1])/2) > 0.4*jump:
+                discontinuities.append(i+1)
+        task.update(detail=f"检测到 {len(discontinuities)} 处深度不连续")
     boundaries = sorted(set(int(i) for i in [0, len(pixels), *discontinuities, *list(np.flatnonzero(on[1:] != on[:-1])+1)]))
     sequences = [{"start": a, "end": b-1, "on": bool(on[a])} for a, b in zip(boundaries[:-1], boundaries[1:])]
     heights = np.zeros(len(pixels))
-    for sequence in sequences:
-        if not sequence["on"]:
-            a, b = sequence["start"], sequence["end"]
-            heights[a:b+1] = max(scene.ray_distance(origin, r) for r in directions[a:b+1])
+    with stage("off 段离物距离", total=int(np.count_nonzero(~on))):
+        for sequence in sequences:
+            if not sequence["on"]:
+                a, b = sequence["start"], sequence["end"]
+                distances = []
+                for r in directions[a:b+1]:
+                    distances.append(scene.ray_distance(origin, r))
+                    current_step().advance()
+                heights[a:b+1] = max(distances)
     # A depth split is still on geometry: interpolate between the actual off
     # neighbors across the entire contiguous run, rather than resetting to zero.
     run_boundaries = [0, *[int(i) for i in np.flatnonzero(on[1:] != on[:-1])+1], len(pixels)]
-    for a, end in zip(run_boundaries[:-1], run_boundaries[1:]):
-        if on[a]:
-            b = end-1
-            left = heights[a-1] if a else 0.0
-            right = heights[b+1] if b+1 < len(pixels) else 0.0
-            if anchors is not None:
-                if a == 0:
-                    left = max(0.0, scene.distance(anchors[0])[0])
-                if b == len(pixels)-1:
-                    right = max(0.0, scene.distance(anchors[1])[0])
-            heights[a:b+1] = np.linspace(left, right, b-a+1)
+    with stage("on 段高度插值", total=len(run_boundaries)-1):
+        for a, end in progress_iter(list(zip(run_boundaries[:-1], run_boundaries[1:]))):
+            if on[a]:
+                b = end-1
+                left = heights[a-1] if a else 0.0
+                right = heights[b+1] if b+1 < len(pixels) else 0.0
+                if anchors is not None:
+                    if a == 0:
+                        left = max(0.0, scene.distance(anchors[0])[0])
+                    if b == len(pixels)-1:
+                        right = max(0.0, scene.distance(anchors[1])[0])
+                heights[a:b+1] = np.linspace(left, right, b-a+1)
     group = 0
     for sequence in sequences:
         if sequence["on"]:
@@ -126,6 +138,7 @@ def prepare(scene, camera, pixels, anchors=None):
 
 
 
+@tracked("候选顶点与梯度计算")
 def candidate_vertices(scene, origin, directions, on, heights, restore_pruned, anchors=None):
     """ 
     计算候选顶点
@@ -141,7 +154,7 @@ def candidate_vertices(scene, origin, directions, on, heights, restore_pruned, a
         candidates: 候选顶点列表，每个元素是一个字典，包含顶点的相关信息，包括样本索引、深度、位置、法线、对象ID
     """
     candidates = []
-    for i, r in enumerate(directions):
+    for i, r in enumerate(progress_iter(directions)):
         row = []
         if on[i]:
             intervals = scene.intervals(origin, r, float(heights[i]))
@@ -159,4 +172,5 @@ def candidate_vertices(scene, origin, directions, on, heights, restore_pruned, a
             row = [{"sample": i, "rank": 0, "depth": float(np.linalg.norm(point-origin)), "point": point,
                     "normal": unit(scene.gradient(point)[0]), "object": "fixed_anchor", "pruned": False, "active": True}]
         candidates.append(row)
+    current_step().update(detail=f"共 {sum(map(len, candidates))} 个深度候选")
     return candidates

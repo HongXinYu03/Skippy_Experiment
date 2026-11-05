@@ -195,6 +195,42 @@ input[type='number'] {
   grid-template-columns: repeat(3, 1fr);
   gap: 6px;
 }
+.model-import {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.model-import > .button {
+  position: relative;
+  text-align: center;
+}
+.model-import > .button:focus-within {
+  outline: 2px solid #a6a6a6;
+  outline-offset: 2px;
+}
+.model-import input[type='file'] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+.model-import > .disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+.model-import .quiet {
+  margin: 0;
+  line-height: 1.6;
+}
+.object-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mesh-info {
+  margin-top: 0;
+}
 .add-shapes button {
   display: flex;
   flex-direction: column;

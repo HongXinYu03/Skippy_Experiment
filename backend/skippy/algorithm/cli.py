@@ -5,6 +5,7 @@ from pathlib import Path
 from .fixtures import example
 from .models import SolveError, SolveInput
 from .pipeline import solve
+from .progress import console_progress
 
 
 def main(argv=None):
@@ -25,7 +26,8 @@ def main(argv=None):
     if args.export_input:
         Path(args.export_input).write_text(request.model_dump_json(indent=2), encoding="utf-8")
     try:
-        result = solve(request)
+        with console_progress("离线曲线求解", detail=f"物体 {len(request.objects)} | 笔触点 {len(request.points)}"):
+            result = solve(request)
     except SolveError as error:
         result = {"status": error.status, "message": error.message}
     Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

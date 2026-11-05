@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, markRaw, nextTick, onMounted, ref, watch } from 'vue'
 import * as THREE from 'three'
 import Viewport from './components/Viewport.vue'
+import { MAX_MODEL_BYTES, parseModel, validateMesh } from './modelImport'
 import type {
   CameraData,
   CurveRecord,
@@ -32,6 +33,8 @@ const selectedObject = ref('sphere-1'),
   selectedCurve = ref('')
 const mode = ref<Mode>('draw'),
   transformMode = ref<'translate' | 'rotate' | 'scale'>('translate')
+const importing = ref(false),
+  replaceScene = ref(true)
 const stroke = ref<V2[]>([]),
   preview = ref<Result | null>(null)
 const showRaw = ref(false),
@@ -43,7 +46,7 @@ const options = ref<Options>({
   spacing: 8,
   max_points: 240,
   iterations: 80,
-  max_segments: 4800,
+  max_segments: 20000,
   depth_threshold: 0.25,
   gradient_cosine: -0.5,
   collision_tolerance: 0.0005,
@@ -81,7 +84,7 @@ let sourceCamera: CameraData | null = null,
   sequence = 0,
   drawing = false
 let controller: AbortController | undefined
-const kindName = { sphere: '球体', box: '长方体', tetrahedron: '四面体' }
+const kindName = { sphere: '球体', box: '长方体', tetrahedron: '四面体', mesh: '网格模型' }
 const modeHints: Record<Mode, string> = {
   draw: '在画布上绘制，松开生成曲线',
   orbit: '拖动旋转，右键平移，滚轮缩放',
@@ -118,13 +121,18 @@ function remember() {
 }
 function restore(serialized: string) {
   const value = JSON.parse(serialized)
-  objects.value = value.objects
+  objects.value = value.objects.map((o: Shape) => ({
+    ...o,
+    ...(o.mesh ? { mesh: markRaw(o.mesh) } : {}),
+  }))
   curves.value = value.curves
   selectedObject.value = value.selectedObject
   selectedCurve.value = value.selectedCurve
   sceneRevision.value++
   sequence++
   controller?.abort()
+  busy.value = false
+  drawing = false
   preview.value = null
   stroke.value = []
 }
@@ -142,7 +150,12 @@ function redo() {
     restore(value)
   }
 }
-function add(kind: Shape['kind'], guide = false, position: V3 = [0, 0, 0], normal: V3 = [0, 1, 0]) {
+function add(
+  kind: Exclude<Shape['kind'], 'mesh'>,
+  guide = false,
+  position: V3 = [0, 0, 0],
+  normal: V3 = [0, 1, 0],
+) {
   remember()
   const quaternion = new THREE.Quaternion().setFromUnitVectors(
     new THREE.Vector3(0, 1, 0),
@@ -181,7 +194,7 @@ function commitShape() {
   sceneRevision.value++
 }
 function shapes(): Shape[] {
-  return objects.value.map(({ id, kind, position, quaternion, size, enabled, guide }) => ({
+  return objects.value.map(({ id, kind, position, quaternion, size, enabled, guide, mesh }) => ({
     id,
     kind,
     position,
@@ -189,7 +202,56 @@ function shapes(): Shape[] {
     size,
     enabled,
     guide,
+    ...(mesh ? { mesh: { vertices: mesh.vertices, faces: mesh.faces } } : {}),
   }))
+}
+async function importModel(event: Event) {
+  const element = event.target as HTMLInputElement,
+    file = element.files?.[0]
+  if (!file || importing.value) return
+  importing.value = true
+  const replace = replaceScene.value
+  message.value = `正在导入 ${file.name}…`
+  try {
+    if (file.size > MAX_MODEL_BYTES) throw new Error('模型文件超过 64 MB，请简化后导入。')
+    const mesh = await parseModel(await file.arrayBuffer(), file.name)
+    if (!replace && objects.value.length >= 32) throw new Error('场景最多支持 32 个物体。')
+    const object: Shape = {
+      id: identifier(),
+      kind: 'mesh',
+      name: file.name,
+      mesh: markRaw(mesh),
+      position: [0, 0, 0],
+      quaternion: [0, 0, 0, 1],
+      size: [1, 1, 1],
+      enabled: true,
+      guide: false,
+      visible: true,
+    }
+    remember()
+    sequence++
+    controller?.abort()
+    busy.value = false
+    drawing = false
+    preview.value = null
+    stroke.value = []
+    if (replace) {
+      objects.value = [object]
+      curves.value = []
+      selectedCurve.value = ''
+    } else objects.value.push(object)
+    selectedObject.value = object.id
+    sceneRevision.value++
+    mode.value = 'draw'
+    await nextTick()
+    viewport.value?.fit()
+    message.value = `已导入 ${file.name} · ${mesh.faces.length.toLocaleString()} 个三角面，可以直接绘制曲线`
+  } catch (error) {
+    message.value = `导入失败：${error instanceof Error ? error.message : String(error)}`
+  } finally {
+    importing.value = false
+    element.value = ''
+  }
 }
 function request(points: V2[], camera = sourceCamera): SolveRequest {
   if (!camera) throw new Error('创作相机未就绪。')
@@ -423,7 +485,7 @@ async function load(event: Event) {
     file = element.files?.[0]
   if (!file) return
   try {
-    if (file.size > 12_000_000) throw new Error('文件超过 12 MB。')
+    if (file.size > 128 * 1024 * 1024) throw new Error('场景文件超过 128 MB。')
     const value = JSON.parse(await file.text())
     if (
       value.schema !== 'skippy-studio/1' ||
@@ -435,7 +497,7 @@ async function load(event: Event) {
     if (
       value.objects.some(
         (o: Shape) =>
-          !['sphere', 'box', 'tetrahedron'].includes(o.kind) ||
+          !['sphere', 'box', 'tetrahedron', 'mesh'].includes(o.kind) ||
           !Array.isArray(o.position) ||
           o.position.length !== 3 ||
           !Array.isArray(o.size) ||
@@ -445,8 +507,25 @@ async function load(event: Event) {
       )
     )
       throw new Error('几何体参数无效。')
+    for (const object of value.objects as Shape[]) {
+      if (object.kind === 'mesh') validateMesh(object.mesh!)
+      if (
+        ![...object.position, ...object.size, ...object.quaternion].every(Number.isFinite) ||
+        object.size.some((v) => v <= 0 || v > 1000) ||
+        Math.hypot(...object.quaternion) < 1e-10
+      )
+        throw new Error('几何体变换参数无效。')
+    }
     remember()
-    objects.value = value.objects
+    sequence++
+    controller?.abort()
+    busy.value = false
+    preview.value = null
+    stroke.value = []
+    objects.value = value.objects.map((o: Shape) => ({
+      ...o,
+      ...(o.mesh ? { mesh: markRaw(o.mesh) } : {}),
+    }))
     curves.value = value.curves
     selectedObject.value = ''
     selectedCurve.value = value.curves[0]?.id || ''
@@ -508,7 +587,7 @@ onMounted(() => void health())
           >{{ connected ? '已连接' : '未连接' }}</span
         >
         <label class="button"
-          >导入<input type="file" accept="application/json" hidden @change="load"
+          >载入场景<input type="file" accept=".json,application/json" hidden @change="load"
         /></label>
         <button class="primary" @click="save">保存</button>
       </div>
@@ -522,6 +601,19 @@ onMounted(() => void health())
         ><button @click="add('box')"><span class="shape-icon box" />长方体</button
         ><button @click="add('tetrahedron')"><span class="shape-icon tetra" />四面体</button>
       </div>
+      <div class="model-import">
+        <label class="button" :class="{ disabled: importing }"
+          >{{ importing ? '正在导入…' : '导入 PLY / GLB 模型'
+          }}<input
+            type="file"
+            accept=".ply,.glb"
+            :disabled="importing"
+            @change="importModel"
+            aria-label="导入 PLY 或 GLB 模型"
+        /></label>
+        <label class="check"><input v-model="replaceScene" type="checkbox" />替换当前场景</label>
+        <p class="quiet">支持带面的 PLY、GLB；导入后直接用二维画笔绘制三维曲线。</p>
+      </div>
       <div class="object-list">
         <button
           v-for="(object, i) in objects"
@@ -530,13 +622,21 @@ onMounted(() => void health())
           @click="selectObject(object.id)"
         >
           <span class="object-dot" :class="{ guide: object.guide }" /><span
-            >{{ object.guide ? '引导' : '' }}{{ kindName[object.kind] }} {{ i + 1 }}</span
+            class="object-name"
+            :title="object.name"
+            >{{
+              object.name || `${object.guide ? '引导' : ''}${kindName[object.kind]} ${i + 1}`
+            }}</span
           ><small v-if="!object.enabled">已忽略</small>
         </button>
         <p v-if="!objects.length" class="quiet">暂无物体</p>
       </div>
       <template v-if="selectedShape">
         <div class="section-label">属性</div>
+        <p v-if="selectedShape.mesh" class="quiet mesh-info">
+          {{ selectedShape.mesh.vertices.length.toLocaleString() }} 顶点 ·
+          {{ selectedShape.mesh.faces.length.toLocaleString() }} 三角面
+        </p>
         <label class="field"
           >位置
           <span class="vector-fields"
@@ -551,7 +651,9 @@ onMounted(() => void health())
               @change="commitShape" /></span
         ></label>
         <label class="field"
-          >{{ selectedShape.kind === 'box' ? '尺寸' : '半径' }}
+          >{{
+            selectedShape.kind === 'mesh' ? '缩放' : selectedShape.kind === 'box' ? '尺寸' : '半径'
+          }}
           <span class="vector-fields"
             ><input
               v-model.number="selectedShape.size[0]"
@@ -560,7 +662,8 @@ onMounted(() => void health())
               min="0.03"
               aria-label="尺寸 X 或半径"
               @focus="remember"
-              @change="commitShape" /><template v-if="selectedShape.kind === 'box'"
+              @change="commitShape" /><template
+              v-if="selectedShape.kind === 'box' || selectedShape.kind === 'mesh'"
               ><input
                 v-model.number="selectedShape.size[1]"
                 type="number"
@@ -653,6 +756,7 @@ onMounted(() => void health())
           <button :disabled="!history.length" title="撤销" aria-label="撤销" @click="undo">↶</button
           ><button :disabled="!future.length" title="重做" aria-label="重做" @click="redo">↷</button
           ><button title="恢复观察视角" @click="viewport?.reset()">复位</button>
+          <button title="将场景全部物体放入视野" @click="viewport?.fit()">适配</button>
         </div>
       </div>
       <Viewport

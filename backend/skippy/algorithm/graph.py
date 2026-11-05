@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 from .geometry import unit
 from .models import SolveError
+from .progress import tracked, stage, progress_iter, current_step
 
 """ 
 计算曲线的曲率
@@ -60,6 +61,7 @@ class Segment:
     cost: float
 
 
+@tracked("构建候选段")
 def build_segments(scene, candidates, sequences, cuts, options):
     """ 
     构建段
@@ -75,64 +77,72 @@ def build_segments(scene, candidates, sequences, cuts, options):
     """
     segments = []
     rejected = {"depth": 0, "gradient": 0, "collision": 0}
-    for sequence in sequences:
+    for sequence in progress_iter(sequences):
         if not sequence["on"]:
             continue
         a, b, group = sequence["start"], sequence["end"], sequence["group"]
         links = {}
         incoming = set()
-        for i in range(a, b):
-            for j, v in enumerate(candidates[i]):
-                if not v["active"]:
-                    continue
-                valid = []
-                for k, w in enumerate(candidates[i+1]):
-                    if not w["active"]:
+        with stage(f"分组 {group} 候选连接", total=b-a):
+            for i in progress_iter(range(a, b)):
+                for j, v in enumerate(candidates[i]):
+                    if not v["active"]:
                         continue
-                    if abs(v["depth"]-w["depth"]) > options.depth_threshold:
-                        rejected["depth"] += 1
-                    elif v["normal"]@w["normal"] < options.gradient_cosine:
-                        rejected["gradient"] += 1
-                    elif not scene.clear([v["point"], w["point"]], options.collision_tolerance):
-                        rejected["collision"] += 1
-                    else:
-                        valid.append((i+1, k))
-                        incoming.add((i+1, k))
-                links[(i, j)] = valid
+                    valid = []
+                    for k, w in enumerate(candidates[i+1]):
+                        if not w["active"]:
+                            continue
+                        if abs(v["depth"]-w["depth"]) > options.depth_threshold:
+                            rejected["depth"] += 1
+                        elif v["normal"]@w["normal"] < options.gradient_cosine:
+                            rejected["gradient"] += 1
+                        elif not scene.clear([v["point"], w["point"]], options.collision_tolerance):
+                            rejected["collision"] += 1
+                        else:
+                            valid.append((i+1, k))
+                            incoming.add((i+1, k))
+                    links[(i, j)] = valid
         starts = [(i, j) for i in range(a, b+1) for j, v in enumerate(candidates[i]) if v["active"] and (i, j) not in incoming]
         paths = []
         stack = [[s] for s in starts]
-        while stack:
-            path = stack.pop()
-            following = links.get(path[-1], [])
-            if following:
-                stack.extend([path+[v] for v in following])
-            else:
-                paths.append(path)
-            if len(paths)+len(stack)+len(segments) > options.max_segments:
-                raise SolveError("budget_exceeded", "候选段数量超过计算预算，请缩短笔触、简化遮挡或降低采样密度。")
-        for k, path in enumerate(paths):
-            p = np.array([candidates[i][j]["point"] for i, j in path])
-            rank = [candidates[i][j]["rank"] for i, j in path]
-            track = f"{group}:{k}"
-            # Trim around a depth boundary so a bridge can span several rays.
-            left = [0]
-            right = [0]
-            window = min(options.bridge_samples, max(0, len(path)-2))
-            if a in cuts and window:
-                left += list(range(1, window+1))
-            if b+1 in cuts and window:
-                right += list(range(1, window+1))
-            for l in left:
-                for r in right:
-                    # Trimming both ends must leave at least one candidate vertex.
-                    if l+r >= len(path):
-                        continue
-                    q = p[l:len(p)-r if r else None]
-                    selected_ranks = rank[l:len(p)-r if r else None]
-                    segments.append(Segment(f"{track}/{l}/{r}", track, group, path[l][0], path[len(path)-r-1][0], q, selected_ranks, variation(q)))
-                    if len(segments) > options.max_segments:
-                        raise SolveError("budget_exceeded", "段图超过预算，请减少深度桥接窗口或输入复杂度。")
+        with stage(f"分组 {group} 路径提取") as task:
+            explored = 0
+            while stack:
+                path = stack.pop()
+                following = links.get(path[-1], [])
+                if following:
+                    stack.extend([path+[v] for v in following])
+                else:
+                    paths.append(path)
+                explored += 1
+                task.update(detail=f"已探索 {explored}，待探索 {len(stack)}，完整路径 {len(paths)}")
+                if len(paths)+len(stack)+len(segments) > options.max_segments:
+                    raise SolveError("budget_exceeded", "候选段数量超过计算预算，请缩短笔触、简化遮挡或降低采样密度。")
+        with stage(f"分组 {group} 桥接裁剪", total=len(paths)) as task:
+            for k, path in enumerate(progress_iter(paths)):
+                p = np.array([candidates[i][j]["point"] for i, j in path])
+                rank = [candidates[i][j]["rank"] for i, j in path]
+                track = f"{group}:{k}"
+                # Trim around a depth boundary so a bridge can span several rays.
+                left = [0]
+                right = [0]
+                window = min(options.bridge_samples, max(0, len(path)-2))
+                if a in cuts and window:
+                    left += list(range(1, window+1))
+                if b+1 in cuts and window:
+                    right += list(range(1, window+1))
+                for l in left:
+                    for r in right:
+                        # Trimming both ends must leave at least one candidate vertex.
+                        if l+r >= len(path):
+                            continue
+                        q = p[l:len(p)-r if r else None]
+                        selected_ranks = rank[l:len(p)-r if r else None]
+                        segments.append(Segment(f"{track}/{l}/{r}", track, group, path[l][0], path[len(path)-r-1][0], q, selected_ranks, variation(q)))
+                        if len(segments) > options.max_segments:
+                            raise SolveError("budget_exceeded", "段图超过预算，请减少深度桥接窗口或输入复杂度。")
+                task.update(detail=f"累计 {len(segments)} 个候选段")
+    current_step().update(detail=f"候选段 {len(segments)}，拒绝连接 {sum(rejected.values())}")
     return segments, rejected
 
 def interpolate(origin, directions, pixels, a, b, p, q, mix_cache=None):
@@ -172,6 +182,7 @@ def outer(origin, directions, segment, leading):
         return None
     return origin+directions[indices]*values[:, None]
 
+@tracked("DAG 最短路径搜索")
 def shortest_path(node_cost, edges, starts, ends):
     """Topological relaxation. IDs are already ordered by input progress."""
     distance = dict(starts)
@@ -179,7 +190,7 @@ def shortest_path(node_cost, edges, starts, ends):
     outgoing = {}
     for (a, b), weight in edges.items():
         outgoing.setdefault(a, []).append((b, weight))
-    for node in range(len(node_cost)):
+    for node in progress_iter(range(len(node_cost))):
         if node not in distance:
             continue
         for successor, edge_cost in outgoing.get(node, []):
@@ -197,6 +208,7 @@ def shortest_path(node_cost, edges, starts, ends):
         path.append(current)
     return path[::-1], float(cost)
 
+@tracked("段图连接与最优路径")
 def solve_graph(scene, segments, origin, directions, pixels, on, cuts, locks, options, closed, edge_cache=None):
     """ 
      求解段图，找到最优路径
@@ -229,7 +241,7 @@ def solve_graph(scene, segments, origin, directions, pixels, on, cuts, locks, op
     starts, ends = {}, {}
     first_on = int(np.flatnonzero(on)[0])
     last_on = int(np.flatnonzero(on)[-1])
-    for i, s in enumerate(segments):
+    for i, s in enumerate(progress_iter(segments)):
         if not available[i]:
             continue
         if s.start == first_on and (s.group in locks or all(r == 0 for r in s.ranks)):
@@ -243,6 +255,8 @@ def solve_graph(scene, segments, origin, directions, pixels, on, cuts, locks, op
                 ends[i] = variation(np.concatenate([s.points[-3:], p[1:]]))
                 polylines[(i, -1)] = p
         for j in range(i+1, len(segments)):
+            if j % 32 == 0:
+                current_step().update(detail=f"节点 {i+1}/{len(segments)}，连接检查 {j-i}/{len(segments)-i-1}，可行边 {len(edges)}")
             t = segments[j]
             if not available[j] or s.end >= t.start or s.group >= t.group:
                 continue
@@ -293,4 +307,5 @@ def solve_graph(scene, segments, origin, directions, pixels, on, cuts, locks, op
         raise SolveError("numerical_failure", "段图路径未覆盖完整笔触。")
     if closed:
         points[[0, -1]] = (points[0]+points[-1])/2
+    current_step().update(detail=f"节点 {len(segments)}，可行边 {len(edges)}，选中段 {len(path)}，路径代价 {cost:.6g}")
     return points, path, cost, edges

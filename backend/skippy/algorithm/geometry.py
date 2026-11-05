@@ -4,6 +4,8 @@ import numpy as np
 from scipy.optimize import brentq, minimize_scalar
 from scipy.spatial.transform import Rotation
 from .models import Shape
+from .mesh import MeshPrimitive
+from .progress import tracked, progress_iter, current_step
 
 EPS = 1e-10
 TETRA = np.array([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]], float) / np.sqrt(3)
@@ -128,19 +130,39 @@ class Primitive:
         result = minimize_scalar(f, bounds=(max(0, t-self.bound), t+self.bound), method="bounded")
         return max(0.0, result.fun)
 
+    def intervals(self, origin, direction, height=0.0):
+        interval = self.interval(origin, direction, height)
+        return [interval] if interval is not None else []
+
 class Scene:
+    @tracked("场景几何准备")
     def __init__(self, objects):
         objects = [o for o in objects if o.enabled]
         if not objects:
             self.center, self.scale, self.objects = np.zeros(3), 1.0, []
             return
-        positions = np.array([o.position for o in objects])
-        bounds = np.array([np.linalg.norm(o.size)/2 if o.kind == "box" else o.size[0] for o in objects])
-        low = np.min(positions-bounds[:, None], axis=0)
-        high = np.max(positions+bounds[:, None], axis=0)
+        lows, highs = [], []
+        for obj in objects:
+            if obj.kind == "mesh":
+                rotation = Rotation.from_quat(obj.quaternion).as_matrix()
+                vertices = np.asarray(obj.mesh.vertices)*np.asarray(obj.size)
+                vertices = vertices@rotation.T+np.asarray(obj.position)
+                lows.append(vertices.min(axis=0))
+                highs.append(vertices.max(axis=0))
+            else:
+                bound = np.linalg.norm(obj.size)/2 if obj.kind == "box" else obj.size[0]
+                lows.append(np.asarray(obj.position)-bound)
+                highs.append(np.asarray(obj.position)+bound)
+        low, high = np.min(lows, axis=0), np.max(highs, axis=0)
         self.center = (low+high)/2
         self.scale = float(max(np.max(high-low), 1e-3))
-        self.objects = [Primitive(o, self.center, self.scale) for o in objects]
+        self.objects = []
+        for obj in progress_iter(objects):
+            detail = f"{obj.kind} {obj.id}"
+            if obj.mesh is not None:
+                detail += f"，{len(obj.mesh.faces)} 个三角面"
+            current_step().update(detail=detail)
+            self.objects.append((MeshPrimitive if obj.kind == "mesh" else Primitive)(obj, self.center, self.scale))
 
     def normalize(self, p):
         return (np.asarray(p)-self.center)/self.scale
@@ -161,8 +183,7 @@ class Scene:
         """Union of offset solids, removing internal and overlapping roots."""
         intervals = []
         for obj in self.objects:
-            interval = obj.interval(origin, direction, height)
-            if interval is not None:
+            for interval in obj.intervals(origin, direction, height):
                 intervals.append((*interval, obj.spec.id))
         merged = []
         for low, high, object_id in sorted(intervals):

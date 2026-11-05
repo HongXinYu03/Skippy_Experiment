@@ -3,6 +3,7 @@ import { onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { TransformControls } from 'three/addons/controls/TransformControls.js'
+import { meshGeometry } from '../modelImport'
 import type { Shape, CameraData, CurveRecord, Result, V2, V3, Mode } from '../types'
 
 const props = defineProps<{
@@ -83,6 +84,26 @@ function reset() {
   camera.updateProjectionMatrix()
   controls.update()
 }
+function fit() {
+  if (!camera || !meshes.size) return
+  const bounds = new THREE.Box3()
+  for (const mesh of meshes.values()) {
+    mesh.updateMatrixWorld(true)
+    if (mesh.visible) bounds.expandByObject(mesh)
+  }
+  if (bounds.isEmpty()) return
+  const sphere = bounds.getBoundingSphere(new THREE.Sphere())
+  const direction = camera.position.clone().sub(controls.target).normalize()
+  const vertical = THREE.MathUtils.degToRad(camera.fov / 2)
+  const horizontal = Math.atan(Math.tan(vertical) * camera.aspect)
+  const distance = (sphere.radius / Math.sin(Math.min(vertical, horizontal))) * 1.15
+  controls.target.copy(sphere.center)
+  camera.position.copy(sphere.center).addScaledVector(direction, distance)
+  camera.near = Math.max(0.001, distance / 1000)
+  camera.far = Math.max(300, distance + sphere.radius * 10)
+  camera.updateProjectionMatrix()
+  controls.update()
+}
 function project(point: V3): V2 {
   const v = new THREE.Vector3(...point).project(camera)
   return [((v.x + 1) * width) / 2, ((1 - v.y) * height) / 2]
@@ -110,18 +131,35 @@ function updateObjects() {
   }
   for (const object of props.objects) {
     let mesh = meshes.get(object.id)
+    if (mesh && (mesh.userData.kind !== object.kind || mesh.userData.source !== object.mesh)) {
+      if (transform.object === mesh) transform.detach()
+      scene.remove(mesh)
+      mesh.geometry.dispose()
+      ;(mesh.material as THREE.Material).dispose()
+      meshes.delete(object.id)
+      mesh = undefined
+    }
     if (!mesh) {
       const geometry =
-        object.kind === 'sphere'
-          ? new THREE.SphereGeometry(1, 64, 48)
-          : object.kind === 'box'
-            ? new THREE.BoxGeometry(1, 1, 1)
-            : new THREE.TetrahedronGeometry(1)
+        object.kind === 'mesh' && object.mesh
+          ? meshGeometry(object.mesh)
+          : object.kind === 'sphere'
+            ? new THREE.SphereGeometry(1, 64, 48)
+            : object.kind === 'box'
+              ? new THREE.BoxGeometry(1, 1, 1)
+              : new THREE.TetrahedronGeometry(1)
       mesh = new THREE.Mesh(
         geometry,
-        new THREE.MeshStandardMaterial({ roughness: 0.78, metalness: 0.02 }),
+        new THREE.MeshStandardMaterial({
+          roughness: 0.78,
+          metalness: 0.02,
+          side: object.kind === 'mesh' ? THREE.DoubleSide : THREE.FrontSide,
+          vertexColors: !!object.mesh?.colors,
+        }),
       )
       mesh.userData.id = object.id
+      mesh.userData.kind = object.kind
+      mesh.userData.source = object.mesh
       mesh.castShadow = true
       mesh.receiveShadow = true
       meshes.set(object.id, mesh)
@@ -130,7 +168,9 @@ function updateObjects() {
     mesh.position.fromArray(object.position)
     mesh.quaternion.fromArray(object.quaternion)
     mesh.scale.fromArray(
-      object.kind === 'box' ? object.size : [object.size[0], object.size[0], object.size[0]],
+      object.kind === 'box' || object.kind === 'mesh'
+        ? object.size
+        : [object.size[0], object.size[0], object.size[0]],
     )
     mesh.visible = object.visible !== false
     const material = mesh.material as THREE.MeshStandardMaterial
@@ -244,7 +284,8 @@ function down(event: PointerEvent) {
     if (intersection) {
       const normal = intersection
         .face!.normal.clone()
-        .transformDirection(intersection.object.matrixWorld)
+        .applyMatrix3(new THREE.Matrix3().getNormalMatrix(intersection.object.matrixWorld))
+        .normalize()
       emit('guide', intersection.point.toArray() as V3, normal.toArray() as V3)
     } else emit('guide', [0, 0, 0], [0, 1, 0])
   }
@@ -358,7 +399,7 @@ onBeforeUnmount(() => {
   })
   renderer?.dispose()
 })
-defineExpose({ snapshot, setCamera, reset, project })
+defineExpose({ snapshot, setCamera, reset, fit, project })
 </script>
 
 <template>
